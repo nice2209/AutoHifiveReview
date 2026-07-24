@@ -123,10 +123,10 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
                 if creds_path.exists():
                     with open(creds_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    # 비밀번호 마스킹
+                    # 비밀번호 마스킹 (실제 비밀번호는 응답에서 제외)
                     if "password" in data:
                         data["password_masked"] = "*" * len(data["password"])
-                        # 실제 비밀번호는 제외하고 보냄 (보안상 필요한 경우 대비)
+                        del data["password"]
                 else:
                     data = {}
                 self.send_json_response(data)
@@ -391,7 +391,7 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
 def run_server():
     # 주소 재사용 가능하도록 설정
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), APIHandler) as httpd:
+    with socketserver.TCPServer(("127.0.0.1", PORT), APIHandler) as httpd:
         print(f"HIFIVE 실습일지 API 서버가 포트 {PORT}에서 실행 중입니다...")
         print(f"로컬 웹 UI 접속: http://localhost:{PORT}")
         try:
