@@ -14,6 +14,7 @@ diary_log.txt
 
 # 임시 분석 파일
 *.html
+!web-ui/**/*.html
 analyze_*.ps1
 fetch_*.ps1
 login_explore.py
