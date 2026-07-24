@@ -1,0 +1,21 @@
+# 의존성
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# 인증 정보 (절대 커밋하지 않음!)
+credentials.json
+
+# 로그 파일
+diary_log.txt
+
+# 임시 분석 파일
+*.html
+analyze_*.ps1
+fetch_*.ps1
+login_explore.py
+explore_*.py
+test_*.py

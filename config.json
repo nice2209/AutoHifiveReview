@@ -1,0 +1,16 @@
+{
+    "base_url": "https://www.hifive.go.kr",
+    "lms_url": "/mobile/mInvovedReportingMain.do",
+    "api": {
+        "login": "/main/login.do",
+        "trainee_list": "/mobile/selectTraineeList.do",
+        "reporting_list": "/mobile/invovedReportingList.do",
+        "save_reporting": "/mobile/saveInvolvedReporting.do",
+        "delete_reporting": "/mobile/deleteInvolvedReporting.do",
+        "personal_info": "/mobile/selectPersonalInfo.do"
+    },
+    "schedule": {
+        "run_time": "18:00",
+        "timezone": "Asia/Seoul"
+    }
+}
