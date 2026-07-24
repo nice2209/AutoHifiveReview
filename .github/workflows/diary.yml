@@ -2,9 +2,9 @@ name: HIFIVE 자동 실습일지
 
 on:
   schedule:
-    # 매일 오후 6시 (KST) = UTC 09:00
-    - cron: '0 9 * * *'
-  workflow_dispatch:  # 수동 실행 지원
+    # 평일(월~금) 오후 6시 (KST) = UTC 09:00, 주말 제외
+    - cron: "0 9 * * 1-5"
+  workflow_dispatch: # 수동 실행 지원
 
 jobs:
   write-diary:
@@ -17,7 +17,7 @@ jobs:
       - name: Python 설정
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: 의존성 설치
         run: pip install -r requirements.txt
