@@ -7,6 +7,7 @@ HIFIVE 실습일지 자동 작성 시스템
 """
 
 import requests
+import ast
 import base64
 import json
 import os
@@ -16,7 +17,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sentence_generator import generate_daily_entry, generate_weekly_summary, generate_week_entries
+from sentence_generator import generate_sentence, load_words
 
 # ==================== 설정 ====================
 
@@ -24,6 +25,14 @@ BASE_URL = "https://www.hifive.go.kr"
 SCRIPT_DIR = Path(__file__).parent
 CREDENTIALS_FILE = SCRIPT_DIR / "credentials.json"
 LOG_FILE = SCRIPT_DIR / "diary_log.txt"
+
+# 일지 슬롯 구분 코드 (WEEK_GUBUN)
+GUBUN_SUMMARY = "7601"  # 주간 요약 (근무시간§담당업무§부서)
+GUBUN_DAILY = "7602"    # 일별 일지
+GUBUN_REVIEW = "7603"   # 실습소감
+GUBUN_ETC = "7604"      # 기타
+
+DAY_NAMES = ["월", "화", "수", "목", "금", "토", "일"]
 
 # 로깅 설정
 logging.basicConfig(
@@ -143,6 +152,24 @@ def get_current_week_number(start_date_str: str, ref_date: datetime = None) -> i
     return max(1, week_num)
 
 
+def find_week_seq(slots: list, ref_date: datetime) -> str | None:
+    """ref_date가 속한 주차 번호를 서버 슬롯 기준으로 찾는다"""
+    ref = ref_date.strftime("%Y%m%d")
+    for s in slots:
+        if s["WEEK_GUBUN"] == GUBUN_SUMMARY and s["START_DATE"] <= ref <= s["END_DATE"]:
+            return s["WEEK_SEQ"]
+    return None
+
+
+def parse_server_json(text: str) -> dict:
+    """
+    HIFIVE 저장 API는 {'result':'y'} 형태의 작은따옴표 응답을 반환한다.
+    브라우저는 eval()로 처리하므로 json.loads로는 파싱되지 않는다.
+    ast.literal_eval은 리터럴만 해석하고 코드를 실행하지 않으므로 eval과 달리 안전하다.
+    """
+    return ast.literal_eval(text.strip())
+
+
 # ==================== 실습일지 저장 ====================
 
 def save_diary_entry(
@@ -168,46 +195,94 @@ def save_diary_entry(
     """
     logger.info(f"{week_num}주차 실습일지 저장 시도...")
 
-    # 폼 데이터 구성
-    form_data = {
-        "save_week": str(week_num),
-        "trainee_seq": str(trainee_seq),
-    }
+    week_seq = str(week_num)
+    slots = get_existing_entries(session, trainee_seq)
+    if not slots:
+        logger.error("일지 슬롯을 조회하지 못했습니다.")
+        return False
 
-    # 주간 요약 (TERM_CD=7601)
-    weekly_content = generate_weekly_summary(entries)
-    # reportDesc 포맷: 시작시간§종료시간§담당업무§부서
-    first_valid = next((e for e in entries if e["work_flag"] == "Y"), entries[0])
-    weekly_report_desc = (
-        f"{first_valid['start_time']}§{first_valid['end_time']}§"
-        f"{weekly_content}§{first_valid['department']}"
+    week_slots = [s for s in slots if s["WEEK_SEQ"] == week_seq]
+    if not week_slots:
+        logger.error(f"{week_num}주차 슬롯이 서버에 없습니다.")
+        return False
+
+    # 저장할 내용을 요일별로 매핑
+    by_day = {e["day_name"]: e for e in entries}
+
+    # 주간 요약(근무시간§담당업무§부서)은 기존 값 우선, 없으면 직전 주차 값을 재사용
+    summary_desc = next(
+        (s["REPORT_DESC"] for s in week_slots
+         if s["WEEK_GUBUN"] == GUBUN_SUMMARY and s["REPORT_DESC"]), ""
     )
-    form_data[f"reportDesc_{week_num}"] = weekly_report_desc
+    if not summary_desc:
+        summary_desc = next(
+            (s["REPORT_DESC"] for s in slots
+             if s["WEEK_GUBUN"] == GUBUN_SUMMARY and s["REPORT_DESC"]), ""
+        )
+    if not summary_desc:
+        base = next((e for e in entries if e["work_flag"] == "Y"), entries[0])
+        summary_desc = (
+            f"{base['start_time']}§{base['end_time']}§"
+            f"{base['content']}§{base['department']}"
+        )
 
-    # 일별 항목
-    day_names = ["월", "화", "수", "목", "금", "토", "일"]
-    for i, entry in enumerate(entries):
-        day_name = entry["day_name"]
-        day_idx = day_names.index(day_name)
-
-        # 실습여부 플래그
-        form_data[f"work_flag_{week_num}_{day_idx}"] = entry["work_flag"]
-
-        # 일별 내용
-        if entry["work_flag"] == "Y":
-            # 일별 reportDesc: 시작시간§종료시간§내용§부서
-            day_report_desc = (
-                f"{entry['start_time']}§{entry['end_time']}§"
-                f"{entry['content']}§{entry['department']}"
-            )
+    # 대상 주차 슬롯별로 저장할 (내용, 실습여부) 결정
+    planned = {}
+    for idx, s in enumerate(week_slots):
+        gubun = s["WEEK_GUBUN"]
+        if gubun == GUBUN_SUMMARY:
+            planned[idx] = (summary_desc, "N")
+        elif gubun == GUBUN_DAILY:
+            entry = by_day.get(s["DY"])
+            if s["REPORT_DESC"]:
+                # 이미 작성된 날은 그대로 보존
+                planned[idx] = (s["REPORT_DESC"], s["WORK_FLAG"] or "Y")
+            elif entry and entry["work_flag"] == "Y" and entry["content"]:
+                planned[idx] = (entry["content"], "Y")
+            else:
+                planned[idx] = ("", "N")
         else:
-            day_report_desc = ""
+            # 실습소감/기타는 기존 값 유지
+            planned[idx] = (s["REPORT_DESC"], "N")
 
-        form_data[f"reportDesc_{week_num}_{day_idx}"] = day_report_desc
+    for idx, s in enumerate(week_slots):
+        desc, flag = planned[idx]
+        logger.info(f"  [{s['WEEK_GUBUN']}] {s['DY']} {s['START_DATE']} "
+                    f"flag={flag} desc={desc[:40]}")
 
-    logger.info(f"전송 데이터: {json.dumps(form_data, ensure_ascii=False, indent=2)}")
+    # 브라우저는 폼 전체($('#bodyFORM').serializeArray())를 전송한다.
+    # 필드명에 인덱스가 붙지 않고 같은 이름이 슬롯 순서대로 반복되므로
+    # 전체 주차 슬롯을 동일한 순서로 재구성해야 한다.
+    form_data = [
+        ("save_week", week_seq),
+        ("file_seq", ""),
+        ("trainee_support_cd_8205", "N"),
+        ("personal_info_agree_yn_chk", ""),
+        ("fund_status_chk", "N"),
+        ("trainee_seq", str(trainee_seq)),
+        ("kind", "1"),
+    ]
+    week_cursor = 0
+    for s in slots:
+        form_data.append(("report_week", s["WEEK_SEQ"]))
+        form_data.append(("term_cd", s["WEEK_GUBUN"]))
+        form_data.append(("report_start_date", s["START_DATE"]))
+        form_data.append(("report_end_date", s["END_DATE"]))
+        if s["WEEK_SEQ"] == week_seq:
+            desc, flag = planned[week_cursor]
+            week_cursor += 1
+        else:
+            # 다른 주차는 서버에 저장된 값을 그대로 되돌려보내 보존한다
+            desc, flag = s["REPORT_DESC"], (s["WORK_FLAG"] or "N")
+        form_data.append(("reportDesc", desc))
+        form_data.append(("work_flag", flag))
+        form_data.append(("teacher_name", s.get("TEACHER_NAME", "")))
 
-    # 저장 요청
+    # 실습여부 체크박스 (값은 주차 내 슬롯 인덱스)
+    for idx, s in enumerate(week_slots):
+        if planned[idx][1] == "Y":
+            form_data.append((f"work_flag_temp_{week_seq}", str(idx)))
+
     resp = session.post(
         f"{BASE_URL}/mobile/saveInvolvedReporting.do",
         data=form_data,
@@ -215,16 +290,20 @@ def save_diary_entry(
     )
 
     try:
-        result = resp.json()
-        if result.get("result") == "y":
-            logger.info(f"{week_num}주차 실습일지 저장 성공!")
-            return True
-        else:
-            logger.error(f"저장 실패: {result.get('resultMsg', '알 수 없는 오류')}")
-            return False
-    except Exception as e:
-        logger.error(f"저장 응답 처리 실패: {e}")
+        result = parse_server_json(resp.text)
+    except (ValueError, SyntaxError) as e:
+        logger.error(f"저장 응답 파싱 실패: {e} | 응답 본문: {resp.text[:300]!r}")
         return False
+
+    if result.get("result") == "y":
+        logger.info(f"{week_num}주차 실습일지 저장 성공!")
+        return True
+
+    logger.error(
+        f"서버가 저장을 거부했습니다: result={result.get('result')} "
+        f"msg={result.get('resultMsg', '(없음)')}"
+    )
+    return False
 
 
 # ==================== 메인 실행 ====================
@@ -248,7 +327,7 @@ def run(target_date: datetime = None, dry_run: bool = False):
     # 주말이면 스킵
     if target_date.weekday() >= 5:
         logger.info("주말이므로 실습일지 작성 스킵")
-        return
+        return True
 
     # 세션 생성
     session = requests.Session()
@@ -259,66 +338,74 @@ def run(target_date: datetime = None, dry_run: bool = False):
     # 로그인
     creds = load_credentials()
     if not login(session, creds["user_id"], creds["password"]):
-        return
+        return False
 
     # 실습 정보 조회
     trainee_info = get_trainee_info(session)
     if not trainee_info:
-        return
+        return False
 
     trainee_seq = trainee_info["TRAINEE_SEQ"]
-    start_date_str = trainee_info["TRAINEE_START_DATE"]
-    start_date = datetime.strptime(start_date_str, "%Y%m%d")
-    last_week = int(trainee_info["LAST_WRITE_REPORT_WEEK"])
 
-    # 현재 주차 계산
-    current_week = get_current_week_number(start_date_str, target_date)
-    logger.info(f"현재 주차: {current_week}주차 (마지막 작성: {last_week}주차)")
+    # 기존 슬롯 조회 후 대상 날짜가 속한 주차를 서버 기준으로 판정
+    slots = get_existing_entries(session, trainee_seq)
+    week_seq = find_week_seq(slots, target_date)
+    if week_seq is None:
+        logger.error(f"{target_date.strftime('%Y-%m-%d')}은 실습 기간에 포함되지 않습니다.")
+        return False
 
-    # 이미 최신 주차까지 작성했는지 확인
-    if current_week <= last_week:
-        logger.info(f"{current_week}주차는 이미 작성 완료됨. 스킵.")
-        return
+    logger.info(f"대상 주차: {week_seq}주차")
 
-    # 기존 일지 확인
-    existing = get_existing_entries(session, trainee_seq)
+    week_slots = [s for s in slots if s["WEEK_SEQ"] == week_seq]
+    target_str = target_date.strftime("%Y%m%d")
+    words = load_words()
 
-    # 해당 주차의 기존 일지가 있는지 확인
-    existing_week_entries = [
-        e for e in existing
-        if e.get("REPORT_WEEK") == str(current_week) and e.get("REPORT_DESC")
-    ]
+    # 근무시간/부서는 기존 주간 요약을 따른다 (없으면 기본값)
+    summary = next(
+        (s["REPORT_DESC"] for s in slots
+         if s["WEEK_GUBUN"] == GUBUN_SUMMARY and s["REPORT_DESC"]), ""
+    )
+    parts = summary.split("§") if summary else []
+    start_time = parts[0] if len(parts) > 0 else "8"
+    end_time = parts[1] if len(parts) > 1 else "17"
+    department = parts[3] if len(parts) > 3 else "개발"
 
-    if existing_week_entries:
-        logger.info(f"{current_week}주차에 이미 {len(existing_week_entries)}개 항목 존재")
-        # 이미 작성된 항목 제외하고 미작성분만 채우기
+    # 대상 날짜까지의 평일 중 비어 있는 날만 새로 채운다.
+    # HIFIVE는 미래 날짜의 일지 입력란을 readonly로 막으므로 미리 쓰지 않는다.
+    entries = []
+    to_write = []
+    for s in week_slots:
+        if s["WEEK_GUBUN"] != GUBUN_DAILY:
+            continue
+        day_name = s["DY"]
+        slot_date = datetime.strptime(s["START_DATE"], "%Y%m%d")
 
-    # 주차별 일일 항목 생성
-    entries = generate_week_entries(start_date, current_week)
+        if s["REPORT_DESC"]:
+            entry = {
+                "date": slot_date, "day_name": day_name,
+                "content": s["REPORT_DESC"], "work_flag": s["WORK_FLAG"] or "Y",
+                "start_time": start_time, "end_time": end_time,
+                "department": department,
+            }
+        elif day_name in ("토", "일") or s["START_DATE"] > target_str:
+            entry = {
+                "date": slot_date, "day_name": day_name,
+                "content": "", "work_flag": "N",
+                "start_time": "", "end_time": "", "department": "",
+            }
+        else:
+            entry = {
+                "date": slot_date, "day_name": day_name,
+                "content": generate_sentence(words), "work_flag": "Y",
+                "start_time": start_time, "end_time": end_time,
+                "department": department,
+            }
+            to_write.append(entry)
+        entries.append(entry)
 
-    # 이미 작성된 항목과 병합
-    day_names = ["월", "화", "수", "목", "금", "토", "일"]
-    for existing_entry in existing_week_entries:
-        day_name = existing_entry.get("DY", "")
-        if day_name in day_names:
-            day_idx = day_names.index(day_name)
-            # 기존 항목이 있으면 해당 날짜는 스킵
-            if existing_entry.get("WORK_FLAG") == "Y":
-                entries[day_idx] = {
-                    "date": entries[day_idx]["date"],
-                    "day_name": day_name,
-                    "content": "",
-                    "work_flag": "N",  # 이미 작성됨
-                    "start_time": "",
-                    "end_time": "",
-                    "department": "",
-                }
-
-    # 작성할 항목 확인
-    to_write = [e for e in entries if e["work_flag"] == "Y" and e["content"]]
     if not to_write:
-        logger.info("작성할 새로운 항목이 없습니다.")
-        return
+        logger.info("작성할 새로운 항목이 없습니다. (이미 작성 완료)")
+        return True
 
     logger.info(f"작성 대상: {len(to_write)}개 항목")
     for e in to_write:
@@ -326,15 +413,16 @@ def run(target_date: datetime = None, dry_run: bool = False):
 
     if dry_run:
         logger.info("[DRY RUN] 실제로 저장하지 않습니다.")
-        return
+        return True
 
     # 저장
-    success = save_diary_entry(session, trainee_seq, current_week, entries)
+    success = save_diary_entry(session, trainee_seq, week_seq, entries)
 
     if success:
-        logger.info(f"{current_week}주차 실습일지 자동 작성 완료!")
+        logger.info(f"{week_seq}주차 실습일지 자동 작성 완료!")
     else:
-        logger.error(f"{current_week}주차 실습일지 저장 실패")
+        logger.error(f"{week_seq}주차 실습일지 저장 실패")
+    return success
 
 
 # ==================== CLI ====================
@@ -354,4 +442,6 @@ if __name__ == "__main__":
     else:
         target_date = datetime.now()
 
-    run(target_date=target_date, dry_run=args.dry_run)
+    # 저장 실패 시 종료 코드 1 — GitHub Actions에서 실패로 표시되어야 한다
+    ok = run(target_date=target_date, dry_run=args.dry_run)
+    sys.exit(0 if ok else 1)
