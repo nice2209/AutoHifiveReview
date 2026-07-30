@@ -200,9 +200,12 @@ def save_diary_entry(
     trainee_seq: str,
     week_num: int,
     entries: list,
+    overwrite: bool = False,
 ) -> bool:
     """
     실습일지를 저장한다.
+
+    overwrite=True면 서버에 이미 저장된 일별 내용도 entries 값으로 덮어쓴다.
 
     entries: [
         {
@@ -257,7 +260,9 @@ def save_diary_entry(
             planned[idx] = (summary_desc, "N")
         elif gubun == GUBUN_DAILY:
             entry = by_day.get(s["DY"])
-            if s["REPORT_DESC"]:
+            if overwrite and entry and entry["work_flag"] == "Y" and entry["content"]:
+                planned[idx] = (entry["content"], "Y")
+            elif s["REPORT_DESC"]:
                 # 이미 작성된 날은 그대로 보존
                 planned[idx] = (s["REPORT_DESC"], s["WORK_FLAG"] or "Y")
             elif entry and entry["work_flag"] == "Y" and entry["content"]:
@@ -455,6 +460,120 @@ def run(target_date: datetime = None, dry_run: bool = False):
     return success
 
 
+def rewrite_entries(until: datetime = None, dry_run: bool = False) -> bool:
+    """
+    이미 작성된 과거 일지를 최신 형식으로 다시 작성한다.
+
+    실습 시작일 기준 첫날/둘째날은 의무교육 본문으로, 나머지 평일은
+    업무 중심 3~4문장 본문으로 교체한다.
+    until(기본 오늘) 이후 날짜와 주말은 건드리지 않는다.
+    """
+    if until is None:
+        until = datetime.now()
+
+    logger.info("=" * 60)
+    logger.info("기존 실습일지 보강 시작")
+    logger.info(f"대상 범위: 실습 시작일 ~ {until.strftime('%Y-%m-%d')}")
+    logger.info("=" * 60)
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    })
+
+    creds = load_credentials()
+    if not login(session, creds["user_id"], creds["password"]):
+        return False
+
+    trainee_info = get_trainee_info(session)
+    if not trainee_info:
+        return False
+
+    trainee_seq = trainee_info["TRAINEE_SEQ"]
+    start_date_str = trainee_info["TRAINEE_START_DATE"]
+    slots = get_existing_entries(session, trainee_seq)
+
+    # 근무시간/부서는 기존 주간 요약을 따른다 (없으면 기본값)
+    summary = next(
+        (s["REPORT_DESC"] for s in slots
+         if s["WEEK_GUBUN"] == GUBUN_SUMMARY and s["REPORT_DESC"]), ""
+    )
+    parts = summary.split("§") if summary else []
+    start_time = parts[0] if len(parts) > 0 else "8"
+    end_time = parts[1] if len(parts) > 1 else "17"
+    department = parts[3] if len(parts) > 3 else "개발"
+
+    words = load_words()
+    until_str = until.strftime("%Y%m%d")
+
+    # 내용이 있는 일별 슬롯을 가진 주차만 보강 대상으로 삼는다
+    target_weeks = sorted(
+        {s["WEEK_SEQ"] for s in slots
+         if s["WEEK_GUBUN"] == GUBUN_DAILY and s["REPORT_DESC"]
+         and s["START_DATE"] <= until_str},
+        key=int,
+    )
+    if not target_weeks:
+        logger.info("보강할 기존 일지가 없습니다.")
+        return True
+
+    logger.info(f"보강 대상 주차: {', '.join(target_weeks)}주차")
+
+    all_ok = True
+    for week_seq in target_weeks:
+        week_slots = [s for s in slots if s["WEEK_SEQ"] == week_seq]
+        entries = []
+        rewritten = 0
+
+        for s in week_slots:
+            if s["WEEK_GUBUN"] != GUBUN_DAILY:
+                continue
+            day_name = s["DY"]
+            slot_date = datetime.strptime(s["START_DATE"], "%Y%m%d")
+
+            if day_name in ("토", "일") or s["START_DATE"] > until_str:
+                entries.append({
+                    "date": slot_date, "day_name": day_name,
+                    "content": "", "work_flag": "N",
+                    "start_time": "", "end_time": "", "department": "",
+                })
+                continue
+
+            w_idx = weekday_index(start_date_str, slot_date)
+            if w_idx == 1:
+                content = generate_orientation_content(0)
+            elif w_idx == 2:
+                content = generate_orientation_content(1)
+            else:
+                content = generate_daily_content(words)
+
+            logger.info(f"  [{s['START_DATE']} {day_name}] 기존: {s['REPORT_DESC'] or '(비어 있음)'}")
+            logger.info(f"  [{s['START_DATE']} {day_name}] 신규: {content}")
+
+            entries.append({
+                "date": slot_date, "day_name": day_name,
+                "content": content, "work_flag": "Y",
+                "start_time": start_time, "end_time": end_time,
+                "department": department,
+            })
+            rewritten += 1
+
+        if not rewritten:
+            continue
+
+        if dry_run:
+            logger.info(f"[DRY RUN] {week_seq}주차 {rewritten}개 항목 - 저장하지 않습니다.")
+            continue
+
+        if save_diary_entry(session, trainee_seq, week_seq, entries, overwrite=True):
+            logger.info(f"{week_seq}주차 보강 완료 ({rewritten}개 항목)")
+        else:
+            logger.error(f"{week_seq}주차 보강 실패")
+            all_ok = False
+
+    return all_ok
+
+
 # ==================== CLI ====================
 
 if __name__ == "__main__":
@@ -462,6 +581,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="HIFIVE 실습일지 자동 작성")
     parser.add_argument("--date", type=str, help="작성할 날짜 (YYYY-MM-DD)", default=None)
+    parser.add_argument("--rewrite", action="store_true",
+                        help="이미 작성된 과거 일지를 최신 형식으로 다시 작성")
     parser.add_argument("--dry-run", action="store_true", help="저장하지 않고 출력만")
     parser.add_argument("--week", type=int, help="작성할 주차 번호", default=None)
 
@@ -473,5 +594,8 @@ if __name__ == "__main__":
         target_date = datetime.now()
 
     # 저장 실패 시 종료 코드 1 — GitHub Actions에서 실패로 표시되어야 한다
-    ok = run(target_date=target_date, dry_run=args.dry_run)
+    if args.rewrite:
+        ok = rewrite_entries(until=target_date, dry_run=args.dry_run)
+    else:
+        ok = run(target_date=target_date, dry_run=args.dry_run)
     sys.exit(0 if ok else 1)

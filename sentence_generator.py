@@ -166,15 +166,15 @@ DAILY_CONTENT_PATTERNS = {
         "아침 회의에서 {noun} 관련 업무를 배정받았다.",
     ],
     "work": [
-        "{noun} 기능을 직접 구현하며 동작 방식을 익혔다.",
+        "{noun_fn}을 직접 구현하며 동작 방식을 익혔다.",
         "사수님의 피드백을 반영해 {noun} 부분을 수정했다.",
         "{noun} 진행 중 발생한 오류를 확인하고 원인을 파악했다.",
-        "{noun} 기능을 테스트하며 예외 상황을 점검했다.",
+        "{noun_fn}을 테스트하며 예외 상황을 점검했다.",
         "{noun} 관련 코드를 리뷰하고 개선점을 반영했다.",
         "{noun} 부분이 예상대로 동작하지 않아 원인을 분석했다.",
     ],
     "closing": [
-        "오후에는 {noun} 문서를 정리하고 팀에 공유했다.",
+        "오후에는 {noun} 관련 문서를 정리하고 팀에 공유했다.",
         "내일은 {noun} 작업을 이어서 진행할 예정이다.",
         "퇴근 전 {noun} 관련 작업 내용을 정리했다.",
         "{noun} 작업 결과를 사수님께 보고했다.",
@@ -201,8 +201,11 @@ def generate_daily_content(words: dict = None) -> str:
 
     def build(pattern: str, pool: list = None) -> str:
         noun = pick_noun(pool if pool is not None else noun_pool)
+        # "검색 기능 기능을"처럼 같은 단어가 겹치지 않게 접미어를 붙인다
+        noun_fn = noun if noun.endswith("기능") else f"{noun} 기능"
         return pattern.format(
             noun=noun,
+            noun_fn=noun_fn,
             p=_get_particle(noun),
             sp=_get_subject_particle(noun),
         )
