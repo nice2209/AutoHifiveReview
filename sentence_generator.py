@@ -44,6 +44,12 @@ DEFAULT_WORDS = {
         "에러 처리", "로깅", "모니터링", "사용자 피드백", "A/B 테스트",
         "데이터 분석", "사용자 분석", "전환율 최적화", "버그 수정", "기능 개선",
     ],
+    # 웹 개발 중심 추가 명사 (담당업무가 웹 개발이라 앱/임베디드 계열이 튀지 않도록 보강)
+    "web_nouns": [
+        "Next.js", "Node.js", "Express", "MySQL", "PostgreSQL",
+        "REST API 설계", "프론트엔드 배포", "백엔드 배포", "웹 접근성 개선", "SEO 최적화",
+        "폼 유효성 검사", "세션 관리", "쿠키 처리", "CORS 설정", "환경변수 관리",
+    ],
     # 문장 패턴 ({p}=을/를, {sp}=이/가)
     "patterns": [
         "{adj} 것을 배웠다",
@@ -136,6 +142,107 @@ def generate_sentence(words: dict) -> str:
         p=p,        # 을/를
         sp=sp,      # 이/가
     )
+
+
+# ==================== 업무 중심 일일 본문 (3~4문장) ====================
+
+# 구현/동작 서술과 어울리지 않는 활동성 명사 (작업 문장에서는 제외한다)
+ACTIVITY_NOUNS = {
+    "코드 리뷰", "단위 테스트", "통합 테스트", "배포", "디버깅", "프로파일링",
+    "메모리 최적화", "성능 튜닝", "보안 점검", "문서화", "일정 관리",
+    "스프린트", "회고", "기획 미팅", "모니터링", "사용자 피드백",
+    "A/B 테스트", "데이터 분석", "사용자 분석", "전환율 최적화",
+    "버그 수정", "기능 개선",
+}
+
+# 업무 서술형 문장 패턴 (도입/작업/마무리 3그룹, {p}=을/를, {sp}=이/가)
+DAILY_CONTENT_PATTERNS = {
+    "intro": [
+        "오전에는 {noun} 관련 작업을 진행했다.",
+        "오늘은 {noun} 관련 업무로 하루를 시작했다.",
+        "출근 후 {noun} 관련 이슈를 먼저 확인했다.",
+        "오전 중에 {noun} 작업 계획을 세웠다.",
+        "오늘 일정은 {noun} 작업으로 시작되었다.",
+        "아침 회의에서 {noun} 관련 업무를 배정받았다.",
+    ],
+    "work": [
+        "{noun} 기능을 직접 구현하며 동작 방식을 익혔다.",
+        "사수님의 피드백을 반영해 {noun} 부분을 수정했다.",
+        "{noun} 진행 중 발생한 오류를 확인하고 원인을 파악했다.",
+        "{noun} 기능을 테스트하며 예외 상황을 점검했다.",
+        "{noun} 관련 코드를 리뷰하고 개선점을 반영했다.",
+        "{noun} 부분이 예상대로 동작하지 않아 원인을 분석했다.",
+    ],
+    "closing": [
+        "오후에는 {noun} 문서를 정리하고 팀에 공유했다.",
+        "내일은 {noun} 작업을 이어서 진행할 예정이다.",
+        "퇴근 전 {noun} 관련 작업 내용을 정리했다.",
+        "{noun} 작업 결과를 사수님께 보고했다.",
+        "오늘 진행한 {noun} 작업을 마무리하고 다음 계획을 세웠다.",
+        "{noun} 관련 남은 작업은 내일 이어서 처리하기로 했다.",
+    ],
+}
+
+
+def generate_daily_content(words: dict = None) -> str:
+    """업무 중심 3~4문장 본문 생성 (도입/작업/마무리 구조, 같은 본문 내 명사 중복 없음)"""
+    if words is None:
+        words = load_words()
+
+    noun_pool = list(words["nouns"]) + list(words.get("web_nouns", []))
+    tech_pool = [n for n in noun_pool if n not in ACTIVITY_NOUNS]
+    used_nouns: list = []
+
+    def pick_noun(pool: list) -> str:
+        candidates = [n for n in pool if n not in used_nouns] or pool
+        noun = random.choice(candidates)
+        used_nouns.append(noun)
+        return noun
+
+    def build(pattern: str, pool: list = None) -> str:
+        noun = pick_noun(pool if pool is not None else noun_pool)
+        return pattern.format(
+            noun=noun,
+            p=_get_particle(noun),
+            sp=_get_subject_particle(noun),
+        )
+
+    # 작업 문장은 1~2개를 서로 다른 패턴으로 뽑아 같은 문장이 반복되지 않게 한다
+    work_patterns = random.sample(DAILY_CONTENT_PATTERNS["work"], random.choice([1, 2]))
+
+    sentences = [build(random.choice(DAILY_CONTENT_PATTERNS["intro"]))]
+    sentences += [build(pattern, tech_pool) for pattern in work_patterns]
+    sentences.append(build(random.choice(DAILY_CONTENT_PATTERNS["closing"])))
+
+    return " ".join(sentences)
+
+
+# ==================== 실습 첫날/둘째날 의무교육 본문 ====================
+
+# 첫날: 오리엔테이션 + 산업안전보건교육 중심 (순서 고정, 3~4문장 중 선택)
+ORIENTATION_DAY0_SENTENCES = [
+    "실습 첫날을 맞아 회사 소개와 조직 구성에 대한 오리엔테이션을 받았다.",
+    "실습 일정 및 근무 수칙에 대한 전반적인 안내를 들었다.",
+    "산업안전보건교육을 이수하고 안전수칙을 숙지했다.",
+    "비상 상황 발생 시 대피 경로와 행동 요령을 안내받았다.",
+    "실습 부서에 배치되어 담당 사수님과 인사를 나누었다.",
+]
+
+# 둘째날: 나머지 법정 의무교육 중심 (순서 고정, 3~4문장 중 선택)
+ORIENTATION_DAY1_SENTENCES = [
+    "직장 내 성희롱 예방교육을 수강했다.",
+    "직장 내 괴롭힘 예방교육을 통해 관련 규정을 확인했다.",
+    "개인정보보호 교육을 이수하고 취급 시 유의사항을 익혔다.",
+    "보안서약서를 작성하고 정보 보안 수칙을 안내받았다.",
+    "사내 규정 및 근무수칙에 대한 안내를 받았다.",
+]
+
+
+def generate_orientation_content(day_index: int) -> str:
+    """실습 첫날(0)/둘째날(1) 의무교육 본문 생성 (3~4문장)"""
+    sentences = ORIENTATION_DAY0_SENTENCES if day_index == 0 else ORIENTATION_DAY1_SENTENCES
+    count = random.choice([3, 4])
+    return " ".join(sentences[:count])
 
 
 def generate_daily_entry(date: datetime = None, words: dict = None) -> dict:

@@ -146,7 +146,7 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
 
             elif self.path == '/api/sentence-test':
                 words = sentence_generator.load_words()
-                sentences = [sentence_generator.generate_sentence(words) for _ in range(5)]
+                sentences = [sentence_generator.generate_daily_content(words) for _ in range(5)]
                 self.send_json_response({"sentences": sentences})
 
             else:

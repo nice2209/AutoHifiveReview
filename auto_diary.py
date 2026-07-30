@@ -17,7 +17,11 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sentence_generator import generate_sentence, load_words
+from sentence_generator import (
+    generate_daily_content,
+    generate_orientation_content,
+    load_words,
+)
 
 # ==================== 설정 ====================
 
@@ -150,6 +154,25 @@ def get_current_week_number(start_date_str: str, ref_date: datetime = None) -> i
     delta = (ref_date - start_date).days
     week_num = (delta // 7) + 1
     return max(1, week_num)
+
+
+def weekday_index(start_date_str: str, target: datetime) -> int:
+    """
+    실습 시작일(start_date_str, 형식 "YYYYMMDD") 기준으로 target이
+    평일(토·일 제외) 기준 몇 번째 날인지 계산한다. 시작일 자신이 1번째다.
+    target이 시작일보다 이전이면 0 이하를 반환한다.
+    """
+    start_date = datetime.strptime(start_date_str, "%Y%m%d")
+    if target.date() < start_date.date():
+        return 0
+
+    count = 0
+    current = start_date
+    while current.date() <= target.date():
+        if current.weekday() < 5:
+            count += 1
+        current += timedelta(days=1)
+    return count
 
 
 def find_week_seq(slots: list, ref_date: datetime) -> str | None:
@@ -394,9 +417,16 @@ def run(target_date: datetime = None, dry_run: bool = False):
                 "start_time": "", "end_time": "", "department": "",
             }
         else:
+            w_idx = weekday_index(trainee_info["TRAINEE_START_DATE"], slot_date)
+            if w_idx == 1:
+                content = generate_orientation_content(0)
+            elif w_idx == 2:
+                content = generate_orientation_content(1)
+            else:
+                content = generate_daily_content(words)
             entry = {
                 "date": slot_date, "day_name": day_name,
-                "content": generate_sentence(words), "work_flag": "Y",
+                "content": content, "work_flag": "Y",
                 "start_time": start_time, "end_time": end_time,
                 "department": department,
             }
