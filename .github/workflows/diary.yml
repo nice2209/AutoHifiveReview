@@ -2,20 +2,22 @@ name: HIFIVE 자동 실습일지
 
 on:
   schedule:
-    # 평일(월~금) 오후 6시 (KST) = UTC 09:00, 주말 제외
-    - cron: "0 9 * * 1-5"
+    # 정각은 GitHub Actions 부하로 지연될 수 있어 평일 오후 6시 17분에 실행
+    - cron: "17 18 * * 1-5"
+      timezone: "Asia/Seoul"
   workflow_dispatch: # 수동 실행 지원
 
 jobs:
   write-diary:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: 체크아웃
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Python 설정
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

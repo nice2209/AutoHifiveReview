@@ -103,13 +103,23 @@ def login(session: requests.Session, user_id: str, password: str) -> bool:
         logger.error(f"로그인 응답 파싱 실패: {resp.text[:200]}")
         return False
 
-    if result.get("RESULT_CODE") == "Y":
+    result_code = result.get("RESULT_CODE")
+    result_message = result.get("RESULT_MESSAGE", "")
+
+    if result_code == "Y":
         mem_seq = result["RESULT_MESSAGE"].split(",")[1]
         logger.info(f"로그인 성공! (mem_seq={mem_seq})")
         return True
-    else:
-        logger.error(f"로그인 실패: {result.get('RESULT_MESSAGE')}")
-        return False
+
+    # HIFIVE 공식 로그인 화면도 PW_CHANGE 응답을 받은 뒤 인증이 필요한
+    # 비밀번호 변경 화면으로 이동한다. 즉 세션은 이미 인증된 상태이므로
+    # 자동 작성은 계속 진행하되 사용자에게 변경 필요성을 경고한다.
+    if result_code == "PW_CHANGE":
+        logger.warning(f"비밀번호 변경 안내: {result_message} (인증 세션으로 계속 진행)")
+        return True
+
+    logger.error(f"로그인 실패: {result_message}")
+    return False
 
 
 # ==================== 실습 정보 ====================
@@ -382,9 +392,8 @@ def run(target_date: datetime = None, dry_run: bool = False):
         logger.error(f"{target_date.strftime('%Y-%m-%d')}은 실습 기간에 포함되지 않습니다.")
         return False
 
-    logger.info(f"대상 주차: {week_seq}주차")
+    logger.info(f"현재 대상 주차: {week_seq}주차")
 
-    week_slots = [s for s in slots if s["WEEK_SEQ"] == week_seq]
     target_str = target_date.strftime("%Y%m%d")
     words = load_words()
 
@@ -398,66 +407,87 @@ def run(target_date: datetime = None, dry_run: bool = False):
     end_time = parts[1] if len(parts) > 1 else "17"
     department = parts[3] if len(parts) > 3 else "개발"
 
-    # 대상 날짜까지의 평일 중 비어 있는 날만 새로 채운다.
-    # HIFIVE는 미래 날짜의 일지 입력란을 readonly로 막으므로 미리 쓰지 않는다.
-    entries = []
-    to_write = []
-    for s in week_slots:
-        if s["WEEK_GUBUN"] != GUBUN_DAILY:
-            continue
-        day_name = s["DY"]
-        slot_date = datetime.strptime(s["START_DATE"], "%Y%m%d")
+    # 현재 주차에 한정하지 않고 대상 날짜까지 비어 있는 모든 평일 주차를
+    # 복구한다. 예약 실행이 며칠 실패하거나 주차 경계를 넘겨도 다음 실행이
+    # 누락분을 스스로 채운다.
+    pending_weeks = sorted(
+        {
+            s["WEEK_SEQ"]
+            for s in slots
+            if s["WEEK_GUBUN"] == GUBUN_DAILY
+            and s["DY"] not in ("토", "일")
+            and s["START_DATE"] <= target_str
+            and not s["REPORT_DESC"]
+        },
+        key=int,
+    )
 
-        if s["REPORT_DESC"]:
-            entry = {
-                "date": slot_date, "day_name": day_name,
-                "content": s["REPORT_DESC"], "work_flag": s["WORK_FLAG"] or "Y",
-                "start_time": start_time, "end_time": end_time,
-                "department": department,
-            }
-        elif day_name in ("토", "일") or s["START_DATE"] > target_str:
-            entry = {
-                "date": slot_date, "day_name": day_name,
-                "content": "", "work_flag": "N",
-                "start_time": "", "end_time": "", "department": "",
-            }
-        else:
-            w_idx = weekday_index(trainee_info["TRAINEE_START_DATE"], slot_date)
-            if w_idx == 1:
-                content = generate_orientation_content(0)
-            elif w_idx == 2:
-                content = generate_orientation_content(1)
-            else:
-                content = generate_daily_content(words)
-            entry = {
-                "date": slot_date, "day_name": day_name,
-                "content": content, "work_flag": "Y",
-                "start_time": start_time, "end_time": end_time,
-                "department": department,
-            }
-            to_write.append(entry)
-        entries.append(entry)
-
-    if not to_write:
+    if not pending_weeks:
         logger.info("작성할 새로운 항목이 없습니다. (이미 작성 완료)")
         return True
 
-    logger.info(f"작성 대상: {len(to_write)}개 항목")
-    for e in to_write:
-        logger.info(f"  {e['date'].strftime('%m-%d')} ({e['day_name']}): {e['content']}")
+    logger.info(f"누락 복구 대상 주차: {', '.join(pending_weeks)}주차")
+    all_ok = True
 
-    if dry_run:
-        logger.info("[DRY RUN] 실제로 저장하지 않습니다.")
-        return True
+    for pending_week in pending_weeks:
+        week_slots = [s for s in slots if s["WEEK_SEQ"] == pending_week]
+        entries = []
+        to_write = []
 
-    # 저장
-    success = save_diary_entry(session, trainee_seq, week_seq, entries)
+        for s in week_slots:
+            if s["WEEK_GUBUN"] != GUBUN_DAILY:
+                continue
+            day_name = s["DY"]
+            slot_date = datetime.strptime(s["START_DATE"], "%Y%m%d")
 
-    if success:
-        logger.info(f"{week_seq}주차 실습일지 자동 작성 완료!")
-    else:
-        logger.error(f"{week_seq}주차 실습일지 저장 실패")
-    return success
+            if s["REPORT_DESC"]:
+                entry = {
+                    "date": slot_date, "day_name": day_name,
+                    "content": s["REPORT_DESC"], "work_flag": s["WORK_FLAG"] or "Y",
+                    "start_time": start_time, "end_time": end_time,
+                    "department": department,
+                }
+            elif day_name in ("토", "일") or s["START_DATE"] > target_str:
+                entry = {
+                    "date": slot_date, "day_name": day_name,
+                    "content": "", "work_flag": "N",
+                    "start_time": "", "end_time": "", "department": "",
+                }
+            else:
+                w_idx = weekday_index(trainee_info["TRAINEE_START_DATE"], slot_date)
+                if w_idx == 1:
+                    content = generate_orientation_content(0)
+                elif w_idx == 2:
+                    content = generate_orientation_content(1)
+                else:
+                    content = generate_daily_content(words)
+                entry = {
+                    "date": slot_date, "day_name": day_name,
+                    "content": content, "work_flag": "Y",
+                    "start_time": start_time, "end_time": end_time,
+                    "department": department,
+                }
+                to_write.append(entry)
+            entries.append(entry)
+
+        logger.info(f"{pending_week}주차 작성 대상: {len(to_write)}개 항목")
+        for entry in to_write:
+            logger.info(
+                f"  {entry['date'].strftime('%m-%d')} ({entry['day_name']}): "
+                f"{entry['content']}"
+            )
+
+        if dry_run:
+            logger.info(f"[DRY RUN] {pending_week}주차를 실제로 저장하지 않습니다.")
+            continue
+
+        if save_diary_entry(session, trainee_seq, pending_week, entries):
+            logger.info(f"{pending_week}주차 실습일지 자동 작성 완료!")
+        else:
+            logger.error(f"{pending_week}주차 실습일지 저장 실패")
+            all_ok = False
+
+    return all_ok
 
 
 def rewrite_entries(until: datetime = None, dry_run: bool = False) -> bool:
