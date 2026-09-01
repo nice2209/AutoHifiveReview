@@ -263,6 +263,7 @@ class BackfillTests(unittest.TestCase):
 
 class HolidayTests(unittest.TestCase):
     def test_recognizes_chuseok_and_substitute_holidays(self):
+        self.assertIn("추석", auto_diary.get_public_holiday_name(datetime(2026, 9, 24)))
         self.assertEqual(auto_diary.get_public_holiday_name(datetime(2026, 9, 25)), "추석")
         self.assertIn("대체", auto_diary.get_public_holiday_name(datetime(2026, 8, 17)))
         self.assertIsNone(auto_diary.get_public_holiday_name(datetime(2026, 9, 28)))
@@ -312,6 +313,16 @@ class HolidayTests(unittest.TestCase):
                 "WORK_FLAG": "Y",
                 "TEACHER_NAME": "",
             },
+            {
+                "WEEK_SEQ": "5",
+                "WEEK_GUBUN": auto_diary.GUBUN_DAILY,
+                "START_DATE": "20260818",
+                "END_DATE": "20260818",
+                "DY": "화",
+                "REPORT_DESC": "정상 근무일 일지",
+                "WORK_FLAG": "Y",
+                "TEACHER_NAME": "",
+            },
         ]
         entries = [
             {
@@ -333,8 +344,11 @@ class HolidayTests(unittest.TestCase):
 
         self.assertTrue(result)
         form_data = session.post.call_args.kwargs["data"]
-        self.assertEqual([value for key, value in form_data if key == "reportDesc"], ["8§17§업무§개발", ""])
-        self.assertEqual([value for key, value in form_data if key == "work_flag"], ["N", "N"])
+        self.assertEqual(
+            [value for key, value in form_data if key == "reportDesc"],
+            ["8§17§업무§개발", "", "정상 근무일 일지"],
+        )
+        self.assertEqual([value for key, value in form_data if key == "work_flag"], ["N", "N", "Y"])
 
 
 if __name__ == "__main__":

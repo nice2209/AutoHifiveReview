@@ -5,7 +5,13 @@ on:
     # 정각은 GitHub Actions 부하로 지연될 수 있어 평일 오후 6시 17분에 실행
     - cron: "17 18 * * 1-5"
       timezone: "Asia/Seoul"
-  workflow_dispatch: # 수동 실행 지원
+  workflow_dispatch:
+    inputs:
+      clear_holidays:
+        description: "기존 공휴일 일지를 명시적으로 정리"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   write-diary:
@@ -28,4 +34,9 @@ jobs:
         env:
           HIFIVE_USER_ID: ${{ secrets.HIFIVE_USER_ID }}
           HIFIVE_PASSWORD: ${{ secrets.HIFIVE_PASSWORD }}
-        run: python auto_diary.py
+        run: |
+          if [ "${{ inputs.clear_holidays }}" = "true" ]; then
+            python auto_diary.py --clear-holidays
+          else
+            python auto_diary.py
+          fi

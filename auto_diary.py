@@ -14,8 +14,12 @@ import os
 import sys
 import time
 import logging
+from functools import lru_cache
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from holidays import country_holidays
+from holidays.constants import PUBLIC
 
 from sentence_generator import (
     generate_daily_content,
@@ -166,6 +170,24 @@ def get_current_week_number(start_date_str: str, ref_date: datetime = None) -> i
     return max(1, week_num)
 
 
+@lru_cache(maxsize=None)
+def get_korean_public_holidays(year: int):
+    """해당 연도의 대한민국 법정·대체·임시 공휴일 달력을 반환한다."""
+    return country_holidays(
+        "KR",
+        years=year,
+        observed=True,
+        language="ko",
+        categories=PUBLIC,
+    )
+
+
+def get_public_holiday_name(target: datetime) -> str | None:
+    """target이 대한민국 공휴일이면 명칭을, 아니면 None을 반환한다."""
+    target_date = target.date()
+    return get_korean_public_holidays(target_date.year).get(target_date)
+
+
 def weekday_index(start_date_str: str, target: datetime) -> int:
     """
     실습 시작일(start_date_str, 형식 "YYYYMMDD") 기준으로 target이
@@ -179,7 +201,7 @@ def weekday_index(start_date_str: str, target: datetime) -> int:
     count = 0
     current = start_date
     while current.date() <= target.date():
-        if current.weekday() < 5:
+        if current.weekday() < 5 and get_public_holiday_name(current) is None:
             count += 1
         current += timedelta(days=1)
     return count
@@ -270,7 +292,9 @@ def save_diary_entry(
             planned[idx] = (summary_desc, "N")
         elif gubun == GUBUN_DAILY:
             entry = by_day.get(s["DY"])
-            if overwrite and entry and entry["work_flag"] == "Y" and entry["content"]:
+            if entry and entry.get("force_clear"):
+                planned[idx] = ("", "N")
+            elif overwrite and entry and entry["work_flag"] == "Y" and entry["content"]:
                 planned[idx] = (entry["content"], "Y")
             elif s["REPORT_DESC"]:
                 # 이미 작성된 날은 그대로 보존
@@ -362,9 +386,12 @@ def run(target_date: datetime = None, dry_run: bool = False):
     logger.info(f"대상 날짜: {target_date.strftime('%Y-%m-%d')} ({['월','화','수','목','금','토','일'][target_date.weekday()]})")
     logger.info("=" * 60)
 
-    # 주말이면 스킵
+    # 주말·공휴일이면 스킵
     if target_date.weekday() >= 5:
         logger.info("주말이므로 실습일지 작성 스킵")
+        return True
+    if holiday_name := get_public_holiday_name(target_date):
+        logger.info(f"공휴일({holiday_name})이므로 실습일지 작성 스킵")
         return True
 
     # 세션 생성
@@ -410,17 +437,17 @@ def run(target_date: datetime = None, dry_run: bool = False):
     # 현재 주차에 한정하지 않고 대상 날짜까지 비어 있는 모든 평일 주차를
     # 복구한다. 예약 실행이 며칠 실패하거나 주차 경계를 넘겨도 다음 실행이
     # 누락분을 스스로 채운다.
-    pending_weeks = sorted(
-        {
-            s["WEEK_SEQ"]
-            for s in slots
-            if s["WEEK_GUBUN"] == GUBUN_DAILY
-            and s["DY"] not in ("토", "일")
-            and s["START_DATE"] <= target_str
-            and not s["REPORT_DESC"]
-        },
-        key=int,
-    )
+    pending_weeks = set()
+    for slot in slots:
+        if slot["WEEK_GUBUN"] != GUBUN_DAILY or slot["START_DATE"] > target_str:
+            continue
+        slot_date = datetime.strptime(slot["START_DATE"], "%Y%m%d")
+        if slot["DY"] in ("토", "일"):
+            continue
+        holiday_name = get_public_holiday_name(slot_date)
+        if not holiday_name and not slot["REPORT_DESC"]:
+            pending_weeks.add(slot["WEEK_SEQ"])
+    pending_weeks = sorted(pending_weeks, key=int)
 
     if not pending_weeks:
         logger.info("작성할 새로운 항목이 없습니다. (이미 작성 완료)")
@@ -439,8 +466,27 @@ def run(target_date: datetime = None, dry_run: bool = False):
                 continue
             day_name = s["DY"]
             slot_date = datetime.strptime(s["START_DATE"], "%Y%m%d")
+            holiday_name = (
+                get_public_holiday_name(slot_date)
+                if s["START_DATE"] <= target_str
+                else None
+            )
 
-            if s["REPORT_DESC"]:
+            if holiday_name:
+                if s["REPORT_DESC"]:
+                    entry = {
+                        "date": slot_date, "day_name": day_name,
+                        "content": s["REPORT_DESC"], "work_flag": s["WORK_FLAG"] or "Y",
+                        "start_time": start_time, "end_time": end_time,
+                        "department": department,
+                    }
+                else:
+                    entry = {
+                        "date": slot_date, "day_name": day_name,
+                        "content": "", "work_flag": "N",
+                        "start_time": "", "end_time": "", "department": "",
+                    }
+            elif s["REPORT_DESC"]:
                 entry = {
                     "date": slot_date, "day_name": day_name,
                     "content": s["REPORT_DESC"], "work_flag": s["WORK_FLAG"] or "Y",
@@ -476,7 +522,6 @@ def run(target_date: datetime = None, dry_run: bool = False):
                 f"  {entry['date'].strftime('%m-%d')} ({entry['day_name']}): "
                 f"{entry['content']}"
             )
-
         if dry_run:
             logger.info(f"[DRY RUN] {pending_week}주차를 실제로 저장하지 않습니다.")
             continue
@@ -485,6 +530,90 @@ def run(target_date: datetime = None, dry_run: bool = False):
             logger.info(f"{pending_week}주차 실습일지 자동 작성 완료!")
         else:
             logger.error(f"{pending_week}주차 실습일지 저장 실패")
+            all_ok = False
+
+    return all_ok
+
+
+def clear_holiday_entries(until: datetime = None, dry_run: bool = False) -> bool:
+    """명시적으로 요청한 경우에만 과거 공휴일의 기존 일지를 비운다."""
+    if until is None:
+        until = datetime.now()
+
+    logger.info("=" * 60)
+    logger.info("공휴일 기존 일지 정리 시작")
+    logger.info(f"대상 범위: 실습 시작일 ~ {until.strftime('%Y-%m-%d')}")
+    logger.info("=" * 60)
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    })
+
+    creds = load_credentials()
+    if not login(session, creds["user_id"], creds["password"]):
+        return False
+
+    trainee_info = get_trainee_info(session)
+    if not trainee_info:
+        return False
+
+    trainee_seq = trainee_info["TRAINEE_SEQ"]
+    slots = get_existing_entries(session, trainee_seq)
+    until_str = until.strftime("%Y%m%d")
+    target_weeks = sorted(
+        {
+            slot["WEEK_SEQ"]
+            for slot in slots
+            if slot["WEEK_GUBUN"] == GUBUN_DAILY
+            and slot["START_DATE"] <= until_str
+            and slot["REPORT_DESC"]
+            and get_public_holiday_name(datetime.strptime(slot["START_DATE"], "%Y%m%d"))
+        },
+        key=int,
+    )
+    if not target_weeks:
+        logger.info("정리할 공휴일 일지가 없습니다.")
+        return True
+
+    all_ok = True
+    for week_seq in target_weeks:
+        entries = []
+        cleared = []
+        for slot in (s for s in slots if s["WEEK_SEQ"] == week_seq and s["WEEK_GUBUN"] == GUBUN_DAILY):
+            slot_date = datetime.strptime(slot["START_DATE"], "%Y%m%d")
+            holiday_name = (
+                get_public_holiday_name(slot_date)
+                if slot["START_DATE"] <= until_str
+                else None
+            )
+            if holiday_name and slot["REPORT_DESC"]:
+                entries.append({
+                    "date": slot_date, "day_name": slot["DY"],
+                    "content": "", "work_flag": "N",
+                    "start_time": "", "end_time": "", "department": "",
+                    "force_clear": True,
+                })
+                cleared.append((slot_date, holiday_name))
+            else:
+                entries.append({
+                    "date": slot_date, "day_name": slot["DY"],
+                    "content": slot["REPORT_DESC"],
+                    "work_flag": slot["WORK_FLAG"] or ("Y" if slot["REPORT_DESC"] else "N"),
+                    "start_time": "", "end_time": "", "department": "",
+                })
+
+        for slot_date, holiday_name in cleared:
+            logger.info(f"  {slot_date.strftime('%m-%d')}: 공휴일({holiday_name}) 기존 일지 삭제")
+
+        if dry_run:
+            logger.info(f"[DRY RUN] {week_seq}주차 {len(cleared)}개 항목 - 저장하지 않습니다.")
+            continue
+
+        if save_diary_entry(session, trainee_seq, week_seq, entries):
+            logger.info(f"{week_seq}주차 공휴일 정리 완료 ({len(cleared)}개 항목)")
+        else:
+            logger.error(f"{week_seq}주차 공휴일 정리 실패")
             all_ok = False
 
     return all_ok
@@ -569,6 +698,19 @@ def rewrite_entries(until: datetime = None, dry_run: bool = False) -> bool:
                 })
                 continue
 
+            if holiday_name := get_public_holiday_name(slot_date):
+                logger.info(
+                    f"  [{s['START_DATE']} {day_name}] 공휴일({holiday_name}) - 기존 값 보존"
+                )
+                entries.append({
+                    "date": slot_date, "day_name": day_name,
+                    "content": s["REPORT_DESC"],
+                    "work_flag": s["WORK_FLAG"] or ("Y" if s["REPORT_DESC"] else "N"),
+                    "start_time": start_time, "end_time": end_time,
+                    "department": department,
+                })
+                continue
+
             w_idx = weekday_index(start_date_str, slot_date)
             if w_idx == 1:
                 content = generate_orientation_content(0)
@@ -613,6 +755,8 @@ if __name__ == "__main__":
     parser.add_argument("--date", type=str, help="작성할 날짜 (YYYY-MM-DD)", default=None)
     parser.add_argument("--rewrite", action="store_true",
                         help="이미 작성된 과거 일지를 최신 형식으로 다시 작성")
+    parser.add_argument("--clear-holidays", action="store_true",
+                        help="기존 공휴일 일지를 명시적으로 비우기")
     parser.add_argument("--dry-run", action="store_true", help="저장하지 않고 출력만")
     parser.add_argument("--week", type=int, help="작성할 주차 번호", default=None)
 
@@ -624,7 +768,9 @@ if __name__ == "__main__":
         target_date = datetime.now()
 
     # 저장 실패 시 종료 코드 1 — GitHub Actions에서 실패로 표시되어야 한다
-    if args.rewrite:
+    if args.clear_holidays:
+        ok = clear_holiday_entries(until=target_date, dry_run=args.dry_run)
+    elif args.rewrite:
         ok = rewrite_entries(until=target_date, dry_run=args.dry_run)
     else:
         ok = run(target_date=target_date, dry_run=args.dry_run)
