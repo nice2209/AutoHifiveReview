@@ -108,6 +108,72 @@ class BackfillTests(unittest.TestCase):
         ]
         self.assertEqual(saved_dates, ["20260828", "20260831", "20260901"])
 
+    def test_run_clears_an_existing_public_holiday_entry(self):
+        slots = [
+            {
+                "WEEK_SEQ": "5",
+                "WEEK_GUBUN": auto_diary.GUBUN_SUMMARY,
+                "START_DATE": "20260817",
+                "END_DATE": "20260823",
+                "DY": "",
+                "REPORT_DESC": "8§17§업무§개발",
+                "WORK_FLAG": "N",
+            },
+            {
+                "WEEK_SEQ": "5",
+                "WEEK_GUBUN": auto_diary.GUBUN_DAILY,
+                "START_DATE": "20260817",
+                "END_DATE": "20260817",
+                "DY": "월",
+                "REPORT_DESC": "잘못 작성된 자동 일지",
+                "WORK_FLAG": "Y",
+            },
+            {
+                "WEEK_SEQ": "5",
+                "WEEK_GUBUN": auto_diary.GUBUN_DAILY,
+                "START_DATE": "20260818",
+                "END_DATE": "20260818",
+                "DY": "화",
+                "REPORT_DESC": "정상 근무일 일지",
+                "WORK_FLAG": "Y",
+            },
+        ]
+        trainee = {
+            "TRAINEE_SEQ": "123",
+            "TRAINEE_START_DATE": "20260720",
+        }
+
+        with (
+            patch.object(auto_diary, "load_credentials", return_value={"user_id": "u", "password": "p"}),
+            patch.object(auto_diary, "login", return_value=True),
+            patch.object(auto_diary, "get_trainee_info", return_value=trainee),
+            patch.object(auto_diary, "get_existing_entries", return_value=slots),
+            patch.object(auto_diary, "load_words", return_value={}),
+            patch.object(auto_diary, "save_diary_entry", return_value=True) as save,
+        ):
+            result = auto_diary.run(target_date=datetime(2026, 8, 18))
+
+        self.assertTrue(result)
+        self.assertEqual(save.call_count, 1)
+        entries = save.call_args.args[3]
+        holiday_entry = next(e for e in entries if e["date"].strftime("%Y%m%d") == "20260817")
+        regular_entry = next(e for e in entries if e["date"].strftime("%Y%m%d") == "20260818")
+        self.assertEqual(holiday_entry["content"], "")
+        self.assertEqual(holiday_entry["work_flag"], "N")
+        self.assertTrue(holiday_entry["force_clear"])
+        self.assertEqual(regular_entry["content"], "정상 근무일 일지")
+
+
+class HolidayTests(unittest.TestCase):
+    def test_recognizes_chuseok_and_substitute_holidays(self):
+        self.assertEqual(auto_diary.get_public_holiday_name(datetime(2026, 9, 25)), "추석")
+        self.assertIn("대체", auto_diary.get_public_holiday_name(datetime(2026, 8, 17)))
+        self.assertIsNone(auto_diary.get_public_holiday_name(datetime(2026, 9, 28)))
+
+    def test_weekday_index_excludes_public_holidays(self):
+        # 8/14(금)=1일차, 8/17(월)=광복절 대체공휴일, 8/18(화)=2일차.
+        self.assertEqual(auto_diary.weekday_index("20260814", datetime(2026, 8, 18)), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
