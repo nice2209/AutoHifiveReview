@@ -20,4 +20,5 @@ fetch_*.ps1
 login_explore.py
 explore_*.py
 test_*.py
+!tests/test_*.py
 .omc/
